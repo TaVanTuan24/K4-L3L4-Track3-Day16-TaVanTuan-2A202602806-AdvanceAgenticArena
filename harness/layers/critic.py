@@ -72,6 +72,8 @@ from __future__ import annotations
 
 from harness.middleware import Middleware
 
+_FUSION_JOINS = (" và ", " còn ", " nhưng ", " trong khi ", "; ", ", còn ")
+
 
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
@@ -79,16 +81,71 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        new_claims = []
+        abstained = bool(report.get("abstain"))
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+
+            if text in ctx.observed_text:
+                new_claims.append(claim)
+                continue
+
+            # Thử tách câu ghép (trường hợp contradiction)
+            split_success = False
+            if ctx.corpus:
+                for join in _FUSION_JOINS:
+                    pos = text.find(join)
+                    while pos > 0:
+                        left = text[:pos]
+                        right = text[pos + len(join):]
+                        if left and right and left in ctx.observed_text and right in ctx.observed_text:
+                            docs_left = [
+                                d for d in ctx.corpus.docs
+                                if d.body in ctx.observed_text and any(left in line for line in d.body.splitlines())
+                            ]
+                            docs_right = [
+                                d for d in ctx.corpus.docs
+                                if d.body in ctx.observed_text and any(right in line for line in d.body.splitlines())
+                            ]
+                            doc1, doc2 = None, None
+                            for d1 in docs_left:
+                                for d2 in docs_right:
+                                    if d1.doc_id != d2.doc_id:
+                                        doc1, doc2 = d1, d2
+                                        break
+                                if doc1:
+                                    break
+                            if doc1 and doc2:
+                                new_claims.append({"text": left, "doc_id": doc1.doc_id})
+                                new_claims.append({"text": right, "doc_id": doc2.doc_id})
+                                abstained = True
+                                split_success = True
+                                break
+                        pos = text.find(join, pos + 1)
+                    if split_success:
+                        break
+
+            # Nếu không tách được: bỏ claim bịa (drop)
+
+        if not new_claims:
+            report["claims"] = []
+            report["citations"] = []
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ trong tài liệu nội bộ đã quan sát để trả lời câu hỏi này."
+        else:
+            report["claims"] = new_claims
+            report["abstain"] = abstained
+            report["citations"] = sorted({c["doc_id"] for c in new_claims if isinstance(c, dict) and c.get("doc_id")})
+
+        return report
