@@ -88,7 +88,7 @@ class Critic(Middleware):
             return report
 
         new_claims = []
-        abstained = bool(report.get("abstain"))
+        abstained = report.get("abstain") is True
 
         for claim in claims:
             if not isinstance(claim, dict):
